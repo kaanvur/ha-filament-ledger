@@ -44,7 +44,7 @@ from ..domain.event import (
 )
 from ..domain.model.spool import Spool
 from ..domain.port.clock import Clock
-from ..domain.port.repositories import SpoolRepository
+from ..domain.port.repositories import SpoolFilter, SpoolRepository
 from ..domain.port.unit_of_work import UnitOfWork
 from ..domain.value.colour_name import label_with_colour
 from ..domain.value.grams import Grams
@@ -349,6 +349,8 @@ class DetectSpool:
         if reading.material is None or reading.colour is None:
             return  # a spool the system cannot describe is a spool it must not invent
         if reading.tag is None:
+            if await self._mount_stored_lookalike(reading):
+                return
             candidates = []
         elif reading.reel is not None:
             if await self.spools.find_by_reel(reading.reel):
@@ -440,6 +442,30 @@ class DetectSpool:
             # resolution below still reports the unknown tag or mounts what does exist —
             # the gateway logs and drops readings, so nothing upstream would retry this.
             LOGGER.exception("auto-registration of tag %s failed", reading.tag)
+
+    async def _mount_stored_lookalike(self, reading: TrayReading) -> bool:
+        """A chipless reel with no identity: reuse the shelved spool that looks like it.
+
+        shortcut: material + colour is the only signal a chipless reel gives, so it is
+        used only when exactly one stored spool matches; with two or more the answer is
+        a guess, and a new row is registered instead (the old behaviour).
+        """
+        if reading.material is None:  # pragma: no cover - caller checked
+            return False
+        material = Material.from_printer(reading.material)
+        async with self.uow:
+            stored = [
+                s
+                for s in await self.spools.list(SpoolFilter(location_kind="STORAGE"))
+                if s.material == material and s.colour == reading.colour
+            ]
+            if len(stored) != 1:
+                return False
+            if await self.spools.find_by_location(AmsSlot(reading.tray)) is not None:
+                return False  # lost a race with a concurrent mount
+            await displace_and_mount(self.spools, stored[0], reading.tray)
+        await self.events.publish(SpoolMounted(spool_id=stored[0].id, tray=reading.tray))
+        return True
 
     async def _tag_appeared(self, reading: TrayReading, tag: TagUid, tray: TrayRef) -> None:
         """UC-02, automatic: resolve the reel, then mount — or ask.

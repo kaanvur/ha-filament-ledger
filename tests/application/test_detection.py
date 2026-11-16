@@ -452,7 +452,7 @@ class TestAutoRegister:
         assert len((await ledger.use_cases.queries.detail(summary.spool.id)).lines) == 1
         assert len(ledger.events.of(SpoolRegistered)) == 1
 
-    async def test_empty_then_another_chipless_spool_creates_a_new_physical_reel(
+    async def test_empty_then_same_chipless_spool_remounts_the_stored_one(
         self, ledger: Ledger
     ) -> None:
         detector = self.detection(ledger)
@@ -462,9 +462,28 @@ class TestAutoRegister:
         await detector.execute(reading)
         await detector.execute(an_empty_tray(1))
         await detector.execute(reading)
-        overview = await ledger.use_cases.queries.overview()
-        assert len(overview) == 2
-        assert sum(s.spool.location == AmsSlot(a_tray(1)) for s in overview) == 1
+        [summary] = await ledger.use_cases.queries.overview()
+        assert summary.spool.location == AmsSlot(a_tray(1))
+
+    async def test_ambiguous_stored_lookalikes_register_a_new_reel(self, ledger: Ledger) -> None:
+        detector = self.detection(ledger)
+        reading = TrayReading(
+            tray=a_tray(1), tag=None, empty=False, material="PLA", colour=Colour.parse("FF0000")
+        )
+        await detector.execute(reading)
+        await detector.execute(an_empty_tray(1))  # first PLA-red reel is now on the shelf
+        await ledger.use_cases.register_spool.execute(  # and a second one
+            RegisterSpoolCommand(
+                material=Material.of(MaterialKind.PLA),
+                colour=Colour.parse("FF0000"),
+                opening_weight=Grams.of(800),
+                core_weight=Grams.of(200),
+                movement_source=MovementSource.AUTOMATIC,
+                opening_basis="CONFIGURED_DEFAULT",
+            )
+        )
+        await detector.execute(reading)
+        assert len(await ledger.use_cases.queries.overview()) == 3
 
     async def test_the_reels_own_weight_opens_the_balance(self, ledger: Ledger) -> None:
         """A 250 g reel is born at 250 g: the tag carried the figure, so the configured
