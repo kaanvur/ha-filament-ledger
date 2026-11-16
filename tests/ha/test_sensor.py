@@ -10,6 +10,7 @@ from collections.abc import Iterable
 from dataclasses import dataclass, field
 from typing import cast
 
+from homeassistant.helpers import device_registry as dr
 from homeassistant.helpers.entity import Entity
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
 
@@ -54,7 +55,13 @@ from custom_components.filament_ledger.sensor import (
 )
 
 from ..application.conftest import EPOCH, Ledger, a_tray
-from .conftest import Harness, a_spool, as_hass
+from .conftest import (
+    FakeDeviceEntry,
+    FakeDeviceRegistry,
+    Harness,
+    a_spool,
+    as_hass,
+)
 
 
 @dataclass
@@ -176,6 +183,36 @@ class TestSpoolSensor:
         assert sensor.available is False
         assert sensor.native_value is None
         assert sensor.extra_state_attributes == {}
+
+    async def test_a_removed_spools_device_is_dropped_and_orphans_are_swept(
+        self, harness: Harness
+    ) -> None:
+        """Deleting a spool must not leave its device on the integration page, including
+        devices stranded by earlier versions that `known_spool_ids` never knew about."""
+        kept = await a_spool(harness.ledger, label="kept")
+        gone = await a_spool(harness.ledger, label="gone")
+        registry = cast(
+            FakeDeviceRegistry,
+            harness.hass.data[dr.DATA_REGISTRY],
+        )
+        for device_id, identifier in (
+            ("kept", kept),
+            ("gone", gone),
+            ("orphan", "long-deleted"),
+            ("ledger", harness.entry.entry_id),
+        ):
+            registry.devices[device_id] = FakeDeviceEntry(
+                id=device_id, identifiers=frozenset({("filament_ledger", identifier)})
+            )
+        await harness.coordinator.async_request_refresh()
+        await set_up_sensors(harness)
+        assert set(registry.devices) == {"kept", "gone", "ledger"}
+
+        await harness.ledger.use_cases.discard_filament.execute(
+            DiscardFilamentCommand(spool_id=gone, mode=DiscardMode.WHOLE_SPOOL, reason="gone")
+        )
+        await harness.coordinator.async_request_refresh()
+        assert set(registry.devices) == {"kept", "ledger"}
 
 
 class TestAggregates:

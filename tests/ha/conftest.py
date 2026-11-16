@@ -22,6 +22,7 @@ import pytest
 import voluptuous as vol
 from homeassistant.components.http import StaticPathConfig
 from homeassistant.core import Event, HomeAssistant, ServiceCall, State
+from homeassistant.helpers import device_registry as dr
 from homeassistant.helpers.update_coordinator import DataUpdateCoordinator
 from homeassistant.util.hass_dict import HassDict
 
@@ -114,15 +115,26 @@ class FakeDeviceEntry:
     via_device_id: str | None = None
 
 
+class _Devices(dict[str, FakeDeviceEntry]):
+    """What `dr.async_entries_for_config_entry` reads; every fake device belongs to the one
+    fake entry."""
+
+    def get_devices_for_config_entry_id(self, entry_id: str) -> list[FakeDeviceEntry]:
+        return list(self.values())
+
+
 class FakeDeviceRegistry:
     """`dr.async_get` returns whatever `hass.data[dr.DATA_REGISTRY]` holds; planting this
     there is the same seam `FakeEntityRegistry` uses one registry over."""
 
     def __init__(self, entries: list[FakeDeviceEntry]) -> None:
-        self.devices = {entry.id: entry for entry in entries}
+        self.devices = _Devices({entry.id: entry for entry in entries})
 
     def async_get(self, device_id: str) -> FakeDeviceEntry | None:
         return self.devices.get(device_id)
+
+    def async_remove_device(self, device_id: str) -> None:
+        del self.devices[device_id]
 
 
 @dataclass
@@ -386,6 +398,7 @@ async def harness(tmp_path: Path) -> AsyncIterator[Harness]:
     # adapters resolve through `hass.config_entries.async_loaded_entries(DOMAIN)`.
     entry = FakeConfigEntry(runtime_data=runtime)
     hass = FakeHass()
+    hass.data[dr.DATA_REGISTRY] = cast(dr.DeviceRegistry, FakeDeviceRegistry([]))
     hass.config_entries.loaded.append(entry)
     hass.config_entries.known[entry.entry_id] = entry
     yield Harness(hass=hass, ledger=ledger, runtime=runtime, entry=entry, coordinator=coordinator)

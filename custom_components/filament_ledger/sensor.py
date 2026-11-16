@@ -19,6 +19,7 @@ from homeassistant.components.sensor import (
 )
 from homeassistant.const import UnitOfMass
 from homeassistant.core import HomeAssistant, callback
+from homeassistant.helpers import device_registry as dr
 from homeassistant.helpers.device_registry import DeviceInfo
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
 from homeassistant.helpers.update_coordinator import CoordinatorEntity
@@ -60,6 +61,18 @@ async def async_setup_entry(
         """
         snapshot = runtime.coordinator.data
         summaries = snapshot.spools if snapshot else []
+        if snapshot:  # before the first refresh every spool would look gone
+            # A deleted or discarded spool leaves the snapshot; drop its device (and with
+            # it the entity) so it stops haunting the integration page. Also sweeps
+            # orphans left by earlier versions: the registry, not `known_spool_ids`, is
+            # the source.
+            live = {s.spool.id for s in summaries}
+            registry = dr.async_get(hass)
+            for device in dr.async_entries_for_config_entry(registry, entry.entry_id):
+                ids = {i for d, i in device.identifiers if d == DOMAIN}
+                if ids and not ids & (live | {entry.entry_id}):
+                    registry.async_remove_device(device.id)
+            runtime.known_spool_ids.intersection_update(live)
         fresh = [s for s in summaries if s.spool.id not in runtime.known_spool_ids]
         if not fresh:
             return
