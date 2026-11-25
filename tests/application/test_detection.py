@@ -72,14 +72,15 @@ OTHER_TAG = TagUid("EC1325E200000100")
 
 
 async def a_spool(ledger: Ledger, **overrides: object) -> SpoolId:
-    command = RegisterSpoolCommand(
-        material=Material.of(MaterialKind.PLA),
-        colour=Colour.parse("000000"),
-        opening_weight=Grams.of(1000),
-        core_weight=Grams.of(250),
-        vendor="Bambu Lab",
-        **overrides,  # type: ignore[arg-type]
-    )
+    fields: dict[str, object] = {
+        "material": Material.of(MaterialKind.PLA),
+        "colour": Colour.parse("000000"),
+        "opening_weight": Grams.of(1000),
+        "core_weight": Grams.of(250),
+        "vendor": "Bambu Lab",
+        **overrides,
+    }
+    command = RegisterSpoolCommand(**fields)  # type: ignore[arg-type]
     return await ledger.use_cases.register_spool.execute(command)
 
 
@@ -417,7 +418,8 @@ class TestAutoRegister:
         assert await ledger.use_cases.queries.overview() == []
 
     async def test_chipless_reading_preserves_a_manual_assignment(self, ledger: Ledger) -> None:
-        spool_id = await a_spool(ledger)
+        """A chipless reading that still describes the occupant confirms the manual mount."""
+        spool_id = await a_spool(ledger, colour=Colour.parse("FF0000"))
         await ledger.use_cases.mount_spool.execute(spool_id, a_tray(1))
         await self.detection(ledger).execute(
             TrayReading(
@@ -431,6 +433,54 @@ class TestAutoRegister:
         )
         [summary] = await ledger.use_cases.queries.overview()
         assert summary.spool.id == spool_id
+
+    async def test_swapping_a_chipless_reel_in_place_replaces_the_occupant(
+        self, ledger: Ledger
+    ) -> None:
+        """The filament was changed on the printer without the tray ever reading empty: the
+        old occupant no longer matches what the printer reports, so the new reel is
+        registered and mounted and the old one goes to storage."""
+        old_id = await a_spool(ledger, colour=Colour.parse("FF0000"))
+        await ledger.use_cases.mount_spool.execute(old_id, a_tray(1))
+        await self.detection(ledger).execute(
+            TrayReading(
+                tray=a_tray(1),
+                tag=None,
+                empty=False,
+                name="ELAS PETG",
+                material="PETG",
+                colour=Colour.parse("0000FF"),
+            )
+        )
+        overview = {s.spool.id: s.spool for s in await ledger.use_cases.queries.overview()}
+        assert overview[old_id].location == Storage()
+        [new] = [s for sid, s in overview.items() if sid != old_id]
+        assert new.location == AmsSlot(a_tray(1))
+        assert new.material == Material.of(MaterialKind.PETG)
+        assert ledger.events.of(SpoolUnmounted) == [SpoolUnmounted(spool_id=old_id)]
+
+    async def test_a_tagged_occupant_is_replaced_by_a_chipless_reading(
+        self, ledger: Ledger
+    ) -> None:
+        """A tagged reel reads its tag; a chipless reading in its tray means it left."""
+        old_id = await a_spool(ledger, tag_uid=TAG, tag_source=TagSource.DETECTED)
+        await ledger.use_cases.mount_spool.execute(old_id, a_tray(1))
+        await self.detection(ledger).execute(
+            TrayReading(
+                tray=a_tray(1),
+                tag=None,
+                empty=False,
+                material="PLA",
+                colour=Colour.parse("000000"),
+            )
+        )
+        assert (await located(ledger, old_id)).location == Storage()
+        [mounted] = [
+            s.spool
+            for s in await ledger.use_cases.queries.overview()
+            if s.spool.location == AmsSlot(a_tray(1))
+        ]
+        assert mounted.id != old_id
 
     async def test_repeated_automatic_registration_guards_the_slot_inside_the_transaction(
         self, ledger: Ledger

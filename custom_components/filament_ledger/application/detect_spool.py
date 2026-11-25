@@ -344,8 +344,20 @@ class DetectSpool:
         if not self.auto_register or (reading.tag is None and not self.auto_mount):
             return
         occupant = await self.spools.find_by_location(AmsSlot(reading.tray))
-        if occupant is not None and (reading.tag is None or occupant.tag_uid is None):
-            return  # A manual assignment remains authoritative until a known identity replaces it.
+        if occupant is not None:
+            if reading.tag is not None:
+                if occupant.tag_uid is None:
+                    return  # A manual assignment stays until the tag path resolves the reel.
+            elif reading.material is None or reading.colour is None:
+                return  # nothing to compare the occupant against
+            elif self._describes(occupant, reading):
+                return  # the printer still describes the occupant: the manual mount stands
+            else:
+                # The filament was changed on the printer without the tray ever reading
+                # empty, so no unmount was ever triggered. A tagged occupant would read its
+                # tag, and an untagged one that no longer matches material and colour is
+                # stale: release the slot, then register or re-mount below.
+                await self._tray_emptied(reading.tray)
         if reading.material is None or reading.colour is None:
             return  # a spool the system cannot describe is a spool it must not invent
         if reading.tag is None:
@@ -443,11 +455,23 @@ class DetectSpool:
             # the gateway logs and drops readings, so nothing upstream would retry this.
             LOGGER.exception("auto-registration of tag %s failed", reading.tag)
 
+    @staticmethod
+    def _describes(spool: Spool, reading: TrayReading) -> bool:
+        """Whether a chipless reading still matches this spool: tagged spools never do,
+        because a tagged reel would have reported its tag."""
+        return (
+            spool.tag_uid is None
+            and reading.material is not None
+            and spool.material == Material.from_printer(reading.material)
+            and spool.colour == reading.colour
+        )
+
     async def _mount_stored_lookalike(self, reading: TrayReading) -> bool:
         """A chipless reel with no identity: reuse the shelved spool that looks like it.
 
         shortcut: material + colour is the only signal a chipless reel gives, so it is
-        used only when exactly one stored spool matches; with two or more the answer is
+        used only when exactly one stored *untagged* spool matches (a tagged reel would
+        have reported its tag); with two or more the answer is
         a guess, and a new row is registered instead (the old behaviour).
         """
         if reading.material is None:  # pragma: no cover - caller checked
@@ -457,7 +481,7 @@ class DetectSpool:
             stored = [
                 s
                 for s in await self.spools.list(SpoolFilter(location_kind="STORAGE"))
-                if s.material == material and s.colour == reading.colour
+                if s.tag_uid is None and s.material == material and s.colour == reading.colour
             ]
             if len(stored) != 1:
                 return False
